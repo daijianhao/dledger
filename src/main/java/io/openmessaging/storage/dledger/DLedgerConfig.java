@@ -20,30 +20,55 @@ import com.beust.jcommander.Parameter;
 import io.openmessaging.storage.dledger.store.file.DLedgerMmapFileStore;
 import java.io.File;
 
+/**
+ * DLedgerConfig
+ *
+ * 多副本模块相关的配置信息，例如集群节点信息。
+ */
 public class DLedgerConfig {
 
     public static final String MEMORY = "MEMORY";
     public static final String FILE = "FILE";
 
+    /**
+     * 当前server所属集群
+     */
     @Parameter(names = {"--group", "-g"}, description = "Group of this server")
     private String group = "default";
 
+    /**
+     * 当前server的ID
+     */
     @Parameter(names = {"--id", "-i"}, description = "Self id of this server")
     private String selfId = "n0";
 
+    /**
+     * 集群中节点的信息 ip:port
+     */
     @Parameter(names = {"--peers", "-p"}, description = "Peer info of this server")
     private String peers = "n0-localhost:20911";
 
+    /**
+     * 当前server存储的home目录
+     */
     @Parameter(names = {"--store-base-dir", "-s"}, description = "The base store dir of this server")
     private String storeBaseDir = File.separator + "tmp" + File.separator + "dledgerstore";
 
-
+    /**
+     * 当flower落后超过这个值后会触发 throttle （v:掐死；n:风门）
+     */
     @Parameter(names = {"--peer-push-throttle-point"}, description = "When the follower is behind the leader more than this value, it will trigger the throttle")
     private int peerPushThrottlePoint = 300 * 1024 * 1024;
 
+    /**
+     * 推送者的配额
+     */
     @Parameter(names = {"--peer-push-quotas"}, description = "The quotas of the pusher")
     private int peerPushQuota = 20 * 1024 * 1024;
 
+    /**
+     * 存储类型，文件或内存
+     */
     private String storeType = FILE; //FILE, MEMORY
     private String dataStorePath;
 
@@ -74,6 +99,9 @@ public class DLedgerConfig {
 
     private long checkPointInterval = 3000;
 
+    /**
+     * 1GB
+     */
     private int mappedFileSizeForEntryData = 1024 * 1024 * 1024;
     private int mappedFileSizeForEntryIndex = DLedgerMmapFileStore.INDEX_UNIT_SIZE * 5 * 1024 * 1024;
 

@@ -30,6 +30,9 @@ import java.util.concurrent.CopyOnWriteArrayList;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+/**
+ * 对标rocketmq中的MmappedFileQueue
+ */
 public class MmapFileList {
     public static final int MIN_BLANK_LEN = 8;
     public static final int BLANK_MAGIC_CODE = -1;
@@ -51,6 +54,10 @@ public class MmapFileList {
         this.mappedFileSize = mappedFileSize;
     }
 
+    /**
+     * 自检
+     * @return
+     */
     public boolean checkSelf() {
         if (!this.mappedFiles.isEmpty()) {
             Iterator<MmapFile> iterator = mappedFiles.iterator();
@@ -59,6 +66,7 @@ public class MmapFileList {
                 MmapFile cur = iterator.next();
 
                 if (pre != null) {
+                    //检查当前文件与上一个文件的偏移量相减是否等于映射的大小，不相等则有BUG
                     if (cur.getFileFromOffset() - pre.getFileFromOffset() != this.mappedFileSize) {
                         logger.error("[BUG]The mappedFile queue's data is damaged, the adjacent mappedFile's offset don't match pre file {}, cur file {}",
                             pre.getFileName(), cur.getFileName());
@@ -190,7 +198,15 @@ public class MmapFileList {
         return preAppend(len, true);
     }
 
+    /**
+     * 我们很容易得出该方法的作用，就是返回待写入日志的起始物理偏移量
+     *
+     * @param len 需要申请的长度
+     * @param useBlank 是否需要填充，默认为true
+     * @return
+     */
     public long preAppend(int len, boolean useBlank) {
+        //获取最后一个文件，即获取当前正在写的文件
         MmapFile mappedFile = getLastMappedFile();
         if (null == mappedFile || mappedFile.isFull()) {
             mappedFile = getLastMappedFile(0);
@@ -200,14 +216,19 @@ public class MmapFileList {
             return -1;
         }
         int blank = useBlank ? MIN_BLANK_LEN : 0;
+        //如果需要申请的资源超过了当前文件可写字节时，需要处理的逻辑
         if (len + blank > mappedFile.getFileSize() - mappedFile.getWrotePosition()) {
             if (blank < MIN_BLANK_LEN) {
                 logger.error("Blank {} should ge {}", blank, MIN_BLANK_LEN);
                 return -1;
             } else {
+                //申请一个当前文件剩余字节的大小的bytebuffer
                 ByteBuffer byteBuffer = ByteBuffer.allocate(mappedFile.getFileSize() - mappedFile.getWrotePosition());
+                //先写入魔数
                 byteBuffer.putInt(BLANK_MAGIC_CODE);
+                //写入字节长度，等于当前文件剩余的总大小
                 byteBuffer.putInt(mappedFile.getFileSize() - mappedFile.getWrotePosition());
+                //写入空字节，代码@4-@7的用意就是写一条空Entry，填入魔数与 size，方便解析
                 if (mappedFile.appendMessage(byteBuffer.array())) {
                     //need to set the wrote position
                     mappedFile.setWrotePosition(mappedFile.getFileSize());
@@ -215,6 +236,7 @@ public class MmapFileList {
                     logger.error("Append blank error for {}", storePath);
                     return -1;
                 }
+                //这里不够的话会新建MappedFile
                 mappedFile = getLastMappedFile(0);
                 if (null == mappedFile) {
                     logger.error("Create mapped file for {}", storePath);
@@ -222,6 +244,7 @@ public class MmapFileList {
                 }
             }
         }
+        //如果当前文件足以容纳待写入的日志，则直接返回其物理偏移量
         return mappedFile.getFileFromOffset() + mappedFile.getWrotePosition();
 
     }
@@ -294,11 +317,13 @@ public class MmapFileList {
                     return false;
                 }
                 try {
+                    //对每一个存储文件，利用mmap进行映射
                     MmapFile mappedFile = new DefaultMmapFile(file.getPath(), mappedFileSize);
-
+                    //设置对应的Position
                     mappedFile.setWrotePosition(this.mappedFileSize);
                     mappedFile.setFlushedPosition(this.mappedFileSize);
                     mappedFile.setCommittedPosition(this.mappedFileSize);
+                    //加入到映射文件列表
                     this.mappedFiles.add(mappedFile);
                     logger.info("load " + file.getPath() + " OK");
                 } catch (IOException e) {

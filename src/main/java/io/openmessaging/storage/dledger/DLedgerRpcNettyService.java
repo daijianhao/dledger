@@ -161,10 +161,12 @@ public class DLedgerRpcNettyService extends DLedgerRpcService {
             try {
                 RemotingCommand wrapperRequest = RemotingCommand.createRequestCommand(DLedgerRequestCode.VOTE.getCode(), null);
                 wrapperRequest.setBody(JSON.toJSONBytes(request));
+                //异步请求其他节点
                 remotingClient.invokeAsync(getPeerAddr(request), wrapperRequest, 3000, responseFuture -> {
                     RemotingCommand responseCommand = responseFuture.getResponseCommand();
                     if (responseCommand != null) {
                         VoteResponse response = JSON.parseObject(responseCommand.getBody(), VoteResponse.class);
+                        //回调中完成future
                         future.complete(response);
                     } else {
                         logger.error("Vote request time out, {}", request.baseInfo());

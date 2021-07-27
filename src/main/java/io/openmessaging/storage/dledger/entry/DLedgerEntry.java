@@ -16,14 +16,26 @@
 
 package io.openmessaging.storage.dledger.entry;
 
+/**
+ * 表示一次写入的数据
+ */
 public class DLedgerEntry {
 
     public final static int POS_OFFSET = 4 + 4 + 8 + 8;
     public final static int HEADER_SIZE = POS_OFFSET + 8 + 4 + 4 + 4;
     public final static int BODY_OFFSET = HEADER_SIZE + 4;
 
+    /**
+     * 魔数
+     */
     private int magic;
+    /**
+     * 大小
+     */
     private int size;
+    /**
+     *
+     */
     private long index;
     private long term;
     private long pos; //used to validate data

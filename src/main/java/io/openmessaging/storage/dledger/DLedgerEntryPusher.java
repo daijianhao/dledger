@@ -45,24 +45,58 @@ import java.util.stream.Collectors;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+/**
+ * 日志推送实现类
+ * 启动后以后台服务的方式运行
+ *
+ * DLedgerEntryPusher
+ * DLedger 日志转发与处理核心类，该内会启动如下3个对象，其分别对应一个线程。
+ * EntryHandler
+ * 日志接收处理线程，当节点为从节点时激活。
+ * QuorumAckChecker
+ * 日志追加ACK投票处理线程，当前节点为主节点时激活。
+ * EntryDispatcher
+ * 日志转发线程，当前节点为主节点时追加。
+ */
 public class DLedgerEntryPusher {
 
     private static Logger logger = LoggerFactory.getLogger(DLedgerEntryPusher.class);
 
+    /**
+     * 多副本相关配置
+     */
     private DLedgerConfig dLedgerConfig;
+    /**
+     * 存储实现类
+     */
     private DLedgerStore dLedgerStore;
-
+    /**
+     * 节点状态机
+     */
     private final MemberState memberState;
-
+    /**
+     * RPC 服务实现类，用于集群内的其他节点进行网络通讯
+     */
     private DLedgerRpcService dLedgerRpcService;
-
+    /**
+     * 每个节点基于投票轮次的当前水位线标记。键值为投票轮次，值为 ConcurrentMap<String/节点id, Long/节点对应的日志序号>
+     */
     private Map<Long, ConcurrentMap<String, Long>> peerWaterMarksByTerm = new ConcurrentHashMap<>();
+    /**
+     * 用于存放追加请求的响应结果(Future模式)
+     */
     private Map<Long, ConcurrentMap<Long, TimeoutFuture<AppendEntryResponse>>> pendingAppendResponsesByTerm = new ConcurrentHashMap<>();
-
+    /**
+     * 从节点上开启的线程，用于接收主节点的 push 请求（append、commit、append）
+     */
     private EntryHandler entryHandler;
-
+    /**
+     * 主节点上的追加请求投票器
+     */
     private QuorumAckChecker quorumAckChecker;
-
+    /**
+     * 主节点日志请求转发器，向从节点复制消息等
+     */
     private Map<String, EntryDispatcher> dispatcherMap = new HashMap<>();
 
     public DLedgerEntryPusher(DLedgerConfig dLedgerConfig, MemberState memberState, DLedgerStore dLedgerStore,
@@ -70,9 +104,11 @@ public class DLedgerEntryPusher {
         this.dLedgerConfig = dLedgerConfig;
         this.memberState = memberState;
         this.dLedgerStore = dLedgerStore;
+        //rpc实现
         this.dLedgerRpcService = dLedgerRpcService;
         for (String peer : memberState.getPeerMap().keySet()) {
             if (!peer.equals(memberState.getSelfId())) {
+                //每个节点，除去自身，都会创建一个Dispatcher
                 dispatcherMap.put(peer, new EntryDispatcher(peer, logger));
             }
         }
@@ -80,6 +116,9 @@ public class DLedgerEntryPusher {
         this.quorumAckChecker = new QuorumAckChecker(logger);
     }
 
+    /**
+     * 依次启动各项服务
+     */
     public void startup() {
         entryHandler.start();
         quorumAckChecker.start();
@@ -88,6 +127,9 @@ public class DLedgerEntryPusher {
         }
     }
 
+    /**
+     * 停止各项服务
+     */
     public void shutdown() {
         entryHandler.shutdown();
         quorumAckChecker.shutdown();
@@ -136,12 +178,14 @@ public class DLedgerEntryPusher {
 
     public boolean isPendingFull(long currTerm) {
         checkTermForPendingMap(currTerm, "isPendingFull");
+        //超过最大pending请求数
         return pendingAppendResponsesByTerm.get(currTerm).size() > dLedgerConfig.getMaxPendingRequestsNum();
     }
 
     public CompletableFuture<AppendEntryResponse> waitAck(DLedgerEntry entry, boolean isBatchWait) {
+        //更新当前节点的 push 水位线
         updatePeerWaterMark(entry.getTerm(), memberState.getSelfId(), entry.getIndex());
-        if (memberState.getPeerMap().size() == 1) {
+        if (memberState.getPeerMap().size() == 1) {//如果集群的节点个数为1，无需转发，直接返回成功结果
             AppendEntryResponse response = new AppendEntryResponse();
             response.setGroup(memberState.getGroup());
             response.setLeaderId(memberState.getSelfId());
@@ -153,6 +197,7 @@ public class DLedgerEntryPusher {
             }
             return AppendFuture.newCompletedFuture(entry.getPos(), response);
         } else {
+            //构建 append 响应 Future 并设置超时时间，默认值为：2500 ms，可以通过 maxWaitAckTimeMs 配置改变其默认值
             checkTermForPendingMap(entry.getTerm(), "waitAck");
             AppendFuture<AppendEntryResponse> future;
             if (isBatchWait) {
@@ -161,6 +206,8 @@ public class DLedgerEntryPusher {
                 future = new AppendFuture<>(dLedgerConfig.getMaxWaitAckTimeMs());
             }
             future.setPos(entry.getPos());
+            //将构建的 Future 放入等待结果集合中
+            //todo 这里没有具体的对follower推送的实现，应该是通过异步线程与中间变量实现的
             CompletableFuture<AppendEntryResponse> old = pendingAppendResponsesByTerm.get(entry.getTerm()).put(entry.getIndex(), future);
             if (old != null) {
                 logger.warn("[MONITOR] get old wait at index={}", entry.getIndex());
@@ -169,6 +216,11 @@ public class DLedgerEntryPusher {
         }
     }
 
+    /**
+     * 唤醒 Entry 转发线程，即将主节点中的数据 push 到各个从节点
+     *
+     * 不知道为啥这个方法没用了
+     */
     public void wakeUpDispatchers() {
         for (EntryDispatcher dispatcher : dispatcherMap.values()) {
             dispatcher.wakeup();
@@ -322,21 +374,59 @@ public class DLedgerEntryPusher {
      *   ^                             |
      *   |---<-----<------<-------<----|
      *
+     *   日志转发线程
+     *
      */
     private class EntryDispatcher extends ShutdownAbleThread {
 
+        /**
+         * 向从节点发送命令的类型，可选值：PushEntryRequest.Type.COMPARE、TRUNCATE、APPEND、COMMIT
+         */
         private AtomicReference<PushEntryRequest.Type> type = new AtomicReference<>(PushEntryRequest.Type.COMPARE);
+        /**
+         * 上一次发送提交类型的时间戳
+         */
         private long lastPushCommitTimeMs = -1;
+        /**
+         * 目标节点ID
+         */
         private String peerId;
+        /**
+         * 已完成比较的日志序号
+         */
         private long compareIndex = -1;
+        /**
+         * 已写入的日志序号
+         */
         private long writeIndex = -1;
+        /**
+         * 允许的最大挂起日志数量
+         */
         private int maxPendingSize = 1000;
+        /**
+         * Leader 节点当前的投票轮次
+         */
         private long term = -1;
+        /**
+         * Leader 节点ID
+         */
         private String leaderId = null;
+        /**
+         * 上次检测泄漏的时间，所谓的泄漏，就是看挂起的日志请求数量是否查过了 maxPendingSize
+         */
         private long lastCheckLeakTimeMs = System.currentTimeMillis();
+        /**
+         * 记录日志的挂起时间，key：日志的序列(entryIndex)，value：挂起时间戳
+         */
         private ConcurrentMap<Long, Long> pendingMap = new ConcurrentHashMap<>();
+        /**
+         * 批量挂起时间
+         */
         private ConcurrentMap<Long, Pair<Long, Integer>> batchPendingMap = new ConcurrentHashMap<>();
         private PushEntryRequest batchAppendEntryRequest = new PushEntryRequest();
+        /**
+         * 配额
+         */
         private Quota quota = new Quota(dLedgerConfig.getPeerPushQuota());
 
         public EntryDispatcher(String peerId, Logger logger) {

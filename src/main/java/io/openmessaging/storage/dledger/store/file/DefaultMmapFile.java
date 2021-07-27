@@ -56,15 +56,21 @@ public class DefaultMmapFile extends ReferenceResource implements MmapFile {
         this.fileName = fileName;
         this.fileSize = fileSize;
         this.file = new File(fileName);
+        //文件名称即起始总偏移量
         this.fileFromOffset = Long.parseLong(this.file.getName());
         boolean ok = false;
 
+        //确保上级目录存在
         ensureDirOK(this.file.getParent());
 
         try {
+            //获取channel
             this.fileChannel = new RandomAccessFile(this.file, "rw").getChannel();
+            //以读写模式映射整个文件
             this.mappedByteBuffer = this.fileChannel.map(MapMode.READ_WRITE, 0, fileSize);
+            //总共映射的虚拟内存大小增加
             TOTAL_MAPPED_VIRTUAL_MEMORY.addAndGet(fileSize);
+            //总共映射的文件增加
             TOTAL_MAPPED_FILES.incrementAndGet();
             ok = true;
         } catch (FileNotFoundException e) {
@@ -75,6 +81,7 @@ public class DefaultMmapFile extends ReferenceResource implements MmapFile {
             throw e;
         } finally {
             if (!ok && this.fileChannel != null) {
+                //失败则关闭channel
                 this.fileChannel.close();
             }
         }
@@ -199,6 +206,7 @@ public class DefaultMmapFile extends ReferenceResource implements MmapFile {
             if (this.hold()) {
                 int value = getReadPosition();
                 try {
+                    //数据刷盘
                     this.mappedByteBuffer.force();
                 } catch (Throwable e) {
                     logger.error("Error occurred when force data to disk.", e);

@@ -32,8 +32,14 @@ import static io.openmessaging.storage.dledger.MemberState.Role.CANDIDATE;
 import static io.openmessaging.storage.dledger.MemberState.Role.FOLLOWER;
 import static io.openmessaging.storage.dledger.MemberState.Role.LEADER;
 
+/**
+ * 节点状态机，即raft协议中的follower、candidate、leader三种状态的状态机实现。
+ */
 public class MemberState {
 
+    /**
+     * term持久化的文件名
+     */
     public static final String TERM_PERSIST_FILE = "currterm";
     public static final String TERM_PERSIST_KEY_TERM = "currTerm";
     public static final String TERM_PERSIST_KEY_VOTE_FOR = "voteLeader";
@@ -253,10 +259,22 @@ public class MemberState {
         return ledgerEndTerm;
     }
 
+    /**
+     * 节点的状态 raft中描述的状态 一共三种
+     */
     public enum Role {
         UNKNOWN,
+        /**
+         * 候选人
+         */
         CANDIDATE,
+        /**
+         * 主节点
+         */
         LEADER,
+        /**
+         * 跟随leader,进行备份
+         */
         FOLLOWER;
     }
 }

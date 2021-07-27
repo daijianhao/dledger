@@ -55,6 +55,9 @@ import java.util.concurrent.CompletableFuture;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+/**
+ * Dledger Server，Dledger节点的封装类
+ */
 public class DLedgerServer implements DLedgerProtocolHander {
 
     private static Logger logger = LoggerFactory.getLogger(DLedgerServer.class);
@@ -105,6 +108,7 @@ public class DLedgerServer implements DLedgerProtocolHander {
         if (storeType.equals(DLedgerConfig.MEMORY)) {
             return new DLedgerMemoryStore(config, memberState);
         } else {
+            //创建文件存储实现类
             return new DLedgerMmapFileStore(config, memberState);
         }
     }
@@ -145,6 +149,9 @@ public class DLedgerServer implements DLedgerProtocolHander {
     }
 
     /**
+     *
+     * 处理append请求
+     *
      * Handle the append requests:
      * 1.append the entry to local store
      * 2.submit the future to entry pusher and wait the quorum ack
@@ -157,12 +164,22 @@ public class DLedgerServer implements DLedgerProtocolHander {
     @Override
     public CompletableFuture<AppendEntryResponse> handleAppend(AppendEntryRequest request) throws IOException {
         try {
+            //如果请求的节点ID不是当前处理节点，则抛出异常
             PreConditions.check(memberState.getSelfId().equals(request.getRemoteId()), DLedgerResponseCode.UNKNOWN_MEMBER, "%s != %s", request.getRemoteId(), memberState.getSelfId());
+            //如果请求的集群不是当前节点所在的集群，则抛出异常
             PreConditions.check(memberState.getGroup().equals(request.getGroup()), DLedgerResponseCode.UNKNOWN_GROUP, "%s != %s", request.getGroup(), memberState.getGroup());
+            //如果当前节点不是主节点，则抛出异常
             PreConditions.check(memberState.isLeader(), DLedgerResponseCode.NOT_LEADER);
+            //如果当前节点正处于leader转移的过程，则抛出异常
             PreConditions.check(memberState.getTransferee() == null, DLedgerResponseCode.LEADER_TRANSFERRING);
+
+            /**
+             * 如果预处理队列已经满了，则拒绝客户端请求，返回 LEADER_PENDING_FULL 错误码；
+             * 如果未满，将请求封装成 DledgerEntry，则调用 dLedgerStore 方法追加日志，
+             * 并且通过使用 dLedgerEntryPusher 的 waitAck 方法同步等待副本节点的复制响应，并最终将结果返回给调用方法
+             */
             long currTerm = memberState.currTerm();
-            if (dLedgerEntryPusher.isPendingFull(currTerm)) {
+            if (dLedgerEntryPusher.isPendingFull(currTerm)) {//如果 dLedgerEntryPusher 的 push 队列已满，则返回追加一次，其错误码为 LEADER_PENDING_FULL
                 AppendEntryResponse appendEntryResponse = new AppendEntryResponse();
                 appendEntryResponse.setGroup(memberState.getGroup());
                 appendEntryResponse.setCode(DLedgerResponseCode.LEADER_PENDING_FULL.getCode());
@@ -170,22 +187,26 @@ public class DLedgerServer implements DLedgerProtocolHander {
                 appendEntryResponse.setLeaderId(memberState.getSelfId());
                 return AppendFuture.newCompletedFuture(-1, appendEntryResponse);
             } else {
-                if (request instanceof BatchAppendEntryRequest) {
+                //追加消息到 Leader 服务器，并向从节点广播，在指定时间内如果未收到从节点的确认，则认为追加失败
+                if (request instanceof BatchAppendEntryRequest) {//如果是批量append
                     BatchAppendEntryRequest batchRequest = (BatchAppendEntryRequest) request;
-                    if (batchRequest.getBatchMsgs() != null && batchRequest.getBatchMsgs().size() != 0) {
+                    if (batchRequest.getBatchMsgs() != null && batchRequest.getBatchMsgs().size() != 0) {//检查是否真的是多个消息
                         // record positions to return;
                         long[] positions = new long[batchRequest.getBatchMsgs().size()];
                         DLedgerEntry resEntry = null;
                         // split bodys to append
                         int index = 0;
                         Iterator<byte[]> iterator = batchRequest.getBatchMsgs().iterator();
+                        //遍历
                         while (iterator.hasNext()) {
                             DLedgerEntry dLedgerEntry = new DLedgerEntry();
                             dLedgerEntry.setBody(iterator.next());
+                            //调用实际的Store实现类进行保存
                             resEntry = dLedgerStore.appendAsLeader(dLedgerEntry);
                             positions[index++] = resEntry.getPos();
                         }
                         // only wait last entry ack is ok
+                        //等待最后一个 append ok
                         BatchAppendFuture<AppendEntryResponse> batchAppendFuture =
                                 (BatchAppendFuture<AppendEntryResponse>) dLedgerEntryPusher.waitAck(resEntry, true);
                         batchAppendFuture.setPositions(positions);
@@ -193,14 +214,16 @@ public class DLedgerServer implements DLedgerProtocolHander {
                     }
                     throw new DLedgerException(DLedgerResponseCode.REQUEST_WITH_EMPTY_BODYS, "BatchAppendEntryRequest" +
                             " with empty bodys");
-                } else {
+                } else {//单个append
                     DLedgerEntry dLedgerEntry = new DLedgerEntry();
                     dLedgerEntry.setBody(request.getBody());
                     DLedgerEntry resEntry = dLedgerStore.appendAsLeader(dLedgerEntry);
+                    //等待完成
                     return dLedgerEntryPusher.waitAck(resEntry, false);
                 }
             }
         } catch (DLedgerException e) {
+            //异常返回错误
             logger.error("[{}][HandleAppend] failed", memberState.getSelfId(), e);
             AppendEntryResponse response = new AppendEntryResponse();
             response.copyBaseInfo(request);

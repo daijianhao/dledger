@@ -20,6 +20,11 @@ import java.nio.ByteBuffer;
 
 public class DLedgerEntryCoder {
 
+    /**
+     * 将entry存入 byteBuffer
+     * @param entry
+     * @param byteBuffer
+     */
     public static void encode(DLedgerEntry entry, ByteBuffer byteBuffer) {
         byteBuffer.clear();
         int size = entry.computSizeInBytes();
