@@ -151,6 +151,7 @@ public class DLedgerServer implements DLedgerProtocolHander {
     /**
      *
      * 处理append请求
+     * 即客户端发送过来的写日志请求
      *
      * Handle the append requests:
      * 1.append the entry to local store
@@ -177,9 +178,12 @@ public class DLedgerServer implements DLedgerProtocolHander {
              * 如果预处理队列已经满了，则拒绝客户端请求，返回 LEADER_PENDING_FULL 错误码；
              * 如果未满，将请求封装成 DledgerEntry，则调用 dLedgerStore 方法追加日志，
              * 并且通过使用 dLedgerEntryPusher 的 waitAck 方法同步等待副本节点的复制响应，并最终将结果返回给调用方法
+             *
              */
             long currTerm = memberState.currTerm();
-            if (dLedgerEntryPusher.isPendingFull(currTerm)) {//如果 dLedgerEntryPusher 的 push 队列已满，则返回追加一次，其错误码为 LEADER_PENDING_FULL
+            //如果 dLedgerEntryPusher 的 push 队列已满，则返回追加一次，其错误码为 LEADER_PENDING_FULL
+            //todo 这里的append请求处理前会判断pending中的请求是否超过了上线 默认 1w，超过了则返回异常
+            if (dLedgerEntryPusher.isPendingFull(currTerm)) {
                 AppendEntryResponse appendEntryResponse = new AppendEntryResponse();
                 appendEntryResponse.setGroup(memberState.getGroup());
                 appendEntryResponse.setCode(DLedgerResponseCode.LEADER_PENDING_FULL.getCode());
@@ -205,8 +209,20 @@ public class DLedgerServer implements DLedgerProtocolHander {
                             resEntry = dLedgerStore.appendAsLeader(dLedgerEntry);
                             positions[index++] = resEntry.getPos();
                         }
+                        /**
+                         * 这里是leader先append，然后再同步给follower
+                         */
                         // only wait last entry ack is ok
                         //等待最后一个 append ok
+                        /**
+                         * todo 注意当前方法：{@link DLedgerServer#handleAppend(io.openmessaging.storage.dledger.protocol.AppendEntryRequest)}
+                         * 是用来处理客户端发起的请求的，这里会先将请求放入pendingMap中，等请求关联的日志（用resEntry.index确定）超过半数的follower都同步成功了，
+                         * 就会从pendingMap中删除
+                         *
+                         * todo 但是，执行到这时，leader的 {@link DLedgerMmapFileStore#ledgerEndIndex} 已经更新了啊
+                         * 在 {@link DLedgerEntryPusher.EntryDispatcher#doAppend()} 中怎么会出现
+                         * writeIndex > dLedgerStore.getLedgerEndIndex() 的情况呢？
+                         */
                         BatchAppendFuture<AppendEntryResponse> batchAppendFuture =
                                 (BatchAppendFuture<AppendEntryResponse>) dLedgerEntryPusher.waitAck(resEntry, true);
                         batchAppendFuture.setPositions(positions);

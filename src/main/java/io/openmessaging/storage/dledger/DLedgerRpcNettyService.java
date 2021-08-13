@@ -98,6 +98,7 @@ public class DLedgerRpcNettyService extends DLedgerRpcService {
     public DLedgerRpcNettyService(DLedgerServer dLedgerServer) {
         this.dLedgerServer = dLedgerServer;
         this.memberState = dLedgerServer.getMemberState();
+        //创建消息的处理器
         NettyRequestProcessor protocolProcessor = new NettyRequestProcessor() {
             @Override
             public RemotingCommand processRequest(ChannelHandlerContext ctx, RemotingCommand request) throws Exception {
@@ -112,6 +113,7 @@ public class DLedgerRpcNettyService extends DLedgerRpcService {
         NettyServerConfig nettyServerConfig = new NettyServerConfig();
         nettyServerConfig.setListenPort(Integer.valueOf(memberState.getSelfAddr().split(":")[1]));
         this.remotingServer = new NettyRemotingServer(nettyServerConfig, null);
+        //注册各种的类型的请求对应的处理器
         this.remotingServer.registerProcessor(DLedgerRequestCode.METADATA.getCode(), protocolProcessor, null);
         this.remotingServer.registerProcessor(DLedgerRequestCode.APPEND.getCode(), protocolProcessor, null);
         this.remotingServer.registerProcessor(DLedgerRequestCode.GET.getCode(), protocolProcessor, null);
@@ -328,7 +330,7 @@ public class DLedgerRpcNettyService extends DLedgerRpcService {
                 }, futureExecutor);
                 break;
             }
-            case APPEND: {
+            case APPEND: {//处理append请求
                 AppendEntryRequest appendEntryRequest = JSON.parseObject(request.getBody(), AppendEntryRequest.class);
                 CompletableFuture<AppendEntryResponse> future = handleAppend(appendEntryRequest);
                 future.whenCompleteAsync((x, y) -> {

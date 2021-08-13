@@ -358,14 +358,17 @@ public class DefaultMmapFile extends ReferenceResource implements MmapFile {
 
     @Override
     public boolean destroy(final long intervalForcibly) {
+        //标记为不可用状态
         this.shutdown(intervalForcibly);
-
+        //当前没有被引用了
         if (this.isCleanupOver()) {
             try {
+                //关闭channel
                 this.fileChannel.close();
                 logger.info("close file channel " + this.fileName + " OK");
 
                 long beginTime = System.currentTimeMillis();
+                //删除文件
                 boolean result = this.file.delete();
                 logger.info("delete file[REF:" + this.getRefCount() + "] " + this.fileName
                     + (result ? " OK, " : " Failed, ") + "W:" + this.getWrotePosition() + " M:"

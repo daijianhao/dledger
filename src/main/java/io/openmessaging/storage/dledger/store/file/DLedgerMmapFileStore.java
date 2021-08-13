@@ -207,16 +207,22 @@ public class DLedgerMmapFileStore extends DLedgerStore {
         }
 
         long firstEntryIndex = -1;
+        //这里是倒序循环，从最新的一个文件开始读起走
         for (int i = index; i >= 0; i--) {
             index = i;
             MmapFile mappedFile = mappedFiles.get(index);
             ByteBuffer byteBuffer = mappedFile.sliceByteBuffer();
             try {
                 long startPos = mappedFile.getFileFromOffset();
+                //魔数
                 int magic = byteBuffer.getInt();
+                //条目总长度，包含 Header(协议头) + 消息体
                 int size = byteBuffer.getInt();
+                //raft中日志的index
                 long entryIndex = byteBuffer.getLong();
+                //对应raft中日志的term
                 long entryTerm = byteBuffer.getLong();
+                //该条目的物理偏移量，类似于 commitlog 文件的物理偏移量
                 long pos = byteBuffer.getLong();
                 byteBuffer.getInt(); //channel
                 byteBuffer.getInt(); //chain crc
@@ -242,6 +248,7 @@ public class DLedgerMmapFileStore extends DLedgerStore {
                 PreConditions.check(entryIndex == indexFromIndex, DLedgerResponseCode.DISK_ERROR, "index %d != %d", entryIndex, indexFromIndex);
                 PreConditions.check(entryTerm == termFromIndex, DLedgerResponseCode.DISK_ERROR, "term %d != %d", entryTerm, termFromIndex);
                 PreConditions.check(posFromIndex == mappedFile.getFileFromOffset(), DLedgerResponseCode.DISK_ERROR, "pos %d != %d", mappedFile.getFileFromOffset(), posFromIndex);
+                //读到了这个文件的第一条日志的index
                 firstEntryIndex = entryIndex;
                 break;
             } catch (Throwable t) {
@@ -256,6 +263,7 @@ public class DLedgerMmapFileStore extends DLedgerStore {
         long lastEntryTerm = -1;
         long processOffset = mappedFile.getFileFromOffset();
         boolean needWriteIndex = false;
+        //从index开始的文件开始读取日志文件
         while (true) {
             try {
                 int relativePos = byteBuffer.position();
@@ -329,6 +337,7 @@ public class DLedgerMmapFileStore extends DLedgerStore {
                     long indexPos = indexFileList.append(indexBuffer.array(), 0, indexBuffer.remaining(), false);
                     PreConditions.check(indexPos == entryIndex * INDEX_UNIT_SIZE, DLedgerResponseCode.DISK_ERROR, "Write index failed index=%d", entryIndex);
                 }
+                //当前node在raft中最新的index和term都取到了
                 lastEntryIndex = entryIndex;
                 lastEntryTerm = entryTerm;
                 processOffset += size;
@@ -344,6 +353,7 @@ public class DLedgerMmapFileStore extends DLedgerStore {
             System.exit(-1);
         }
 
+        //设置raft需要的最新的index和term
         ledgerEndIndex = lastEntryIndex;
         ledgerEndTerm = lastEntryTerm;
         if (lastEntryIndex != -1) {
@@ -357,6 +367,7 @@ public class DLedgerMmapFileStore extends DLedgerStore {
         long indexProcessOffset = (lastEntryIndex + 1) * INDEX_UNIT_SIZE;
         this.indexFileList.updateWherePosition(indexProcessOffset);
         this.indexFileList.truncateOffset(indexProcessOffset);
+        //这里更新当前节点的lastIndex和lastTerm到状态机
         updateLedgerEndIndexAndTerm();
         PreConditions.check(dataFileList.checkSelf(), DLedgerResponseCode.DISK_ERROR, "check data file order failed after recovery");
         PreConditions.check(indexFileList.checkSelf(), DLedgerResponseCode.DISK_ERROR, "check index file order failed after recovery");
@@ -443,6 +454,7 @@ public class DLedgerMmapFileStore extends DLedgerStore {
                 logger.info("[{}] Append as Leader {} {}", memberState.getSelfId(), entry.getIndex(), entry.getBody().length);
             }
             //ledgerEndeIndex 加一（下一个条目）的序号。并设置 leader 节点的状态机的 ledgerEndIndex 与 ledgerEndTerm
+            //这个 ledgerEndIndex 表示下一条要同步给 follower 的日志的索引，初始为 -1
             ledgerEndIndex++;
             ledgerEndTerm = memberState.currTerm();
             if (ledgerBeginIndex == -1) {
@@ -460,6 +472,7 @@ public class DLedgerMmapFileStore extends DLedgerStore {
         ByteBuffer dataBuffer = localEntryBuffer.get();
         ByteBuffer indexBuffer = localIndexBuffer.get();
         DLedgerEntryCoder.encode(entry, dataBuffer);
+        //计算出 entrySize
         int entrySize = dataBuffer.remaining();
         synchronized (memberState) {
             PreConditions.check(memberState.isFollower(), DLedgerResponseCode.NOT_FOLLOWER, "role=%s", memberState.getRole());
@@ -467,26 +480,34 @@ public class DLedgerMmapFileStore extends DLedgerStore {
             PreConditions.check(leaderId.equals(memberState.getLeaderId()), DLedgerResponseCode.INCONSISTENT_LEADER, "leaderId %s != %s", leaderId, memberState.getLeaderId());
             boolean existedEntry;
             try {
+                //获取本地的对应的日志条目
                 DLedgerEntry tmp = get(entry.getIndex());
+                //判断是否相等
                 existedEntry = entry.equals(tmp);
             } catch (Throwable ignored) {
                 existedEntry = false;
             }
+            //计算要truncate 的起始偏移量
             long truncatePos = existedEntry ? entry.getPos() + entry.getSize() : entry.getPos();
             if (truncatePos != dataFileList.getMaxWrotePosition()) {
                 logger.warn("[TRUNCATE]leaderId={} index={} truncatePos={} != maxPos={}, this is usually happened on the old leader", leaderId, entry.getIndex(), truncatePos, dataFileList.getMaxWrotePosition());
             }
+            //进行 truncate
             dataFileList.truncateOffset(truncatePos);
+            //检查truncate后的最大已写的偏移量是否等于truncatePos，不相等则说明有问题，需要重建
             if (dataFileList.getMaxWrotePosition() != truncatePos) {
                 logger.warn("[TRUNCATE] rebuild for data wrotePos: {} != truncatePos: {}", dataFileList.getMaxWrotePosition(), truncatePos);
                 PreConditions.check(dataFileList.rebuildWithPos(truncatePos), DLedgerResponseCode.DISK_ERROR, "rebuild data truncatePos=%d", truncatePos);
             }
             reviseDataFileListFlushedWhere(truncatePos);
-            if (!existedEntry) {
+            if (!existedEntry) {//如果本地不存在对应truncateIndex的日志条目
+                //则将leader同步过来的entry保存
                 long dataPos = dataFileList.append(dataBuffer.array(), 0, dataBuffer.remaining());
                 PreConditions.check(dataPos == entry.getPos(), DLedgerResponseCode.DISK_ERROR, " %d != %d", dataPos, entry.getPos());
             }
+            //接下来还要删除对应的索引数据
 
+            //获取要删除的索引的起始位置 ， 和上面的 删除数据文件类似
             long truncateIndexOffset = entry.getIndex() * INDEX_UNIT_SIZE;
             indexFileList.truncateOffset(truncateIndexOffset);
             if (indexFileList.getMaxWrotePosition() != truncateIndexOffset) {
@@ -499,6 +520,8 @@ public class DLedgerMmapFileStore extends DLedgerStore {
             PreConditions.check(indexPos == entry.getIndex() * INDEX_UNIT_SIZE, DLedgerResponseCode.DISK_ERROR, null);
             ledgerEndTerm = entry.getTerm();
             ledgerEndIndex = entry.getIndex();
+
+            //更新当前follower的beginIndex和endIndex endTerm
             reviseLedgerBeginIndex();
             updateLedgerEndIndexAndTerm();
             return entry.getIndex();
@@ -506,9 +529,11 @@ public class DLedgerMmapFileStore extends DLedgerStore {
     }
 
     private void reviseDataFileListFlushedWhere(long truncatePos) {
+        //获取已经 flushed 的 偏移量
         long offset = calculateWherePosition(this.dataFileList, truncatePos);
         logger.info("Revise dataFileList flushedWhere from {} to {}", this.dataFileList.getFlushedWhere(), offset);
         // It seems unnecessary to set position atomically. Wrong position won't get updated during flush or commit.
+        //设置 flushed 和 committed 偏移量
         this.dataFileList.updateWherePosition(offset);
     }
 
@@ -609,11 +634,13 @@ public class DLedgerMmapFileStore extends DLedgerStore {
         SelectMmapBufferResult indexSbr = null;
         SelectMmapBufferResult dataSbr = null;
         try {
+            //先通过index计算出消息的位置
             indexSbr = indexFileList.getData(index * INDEX_UNIT_SIZE, INDEX_UNIT_SIZE);
             PreConditions.check(indexSbr != null && indexSbr.getByteBuffer() != null, DLedgerResponseCode.DISK_ERROR, "Get null index for %d", index);
             indexSbr.getByteBuffer().getInt(); //magic
             long pos = indexSbr.getByteBuffer().getLong();
             int size = indexSbr.getByteBuffer().getInt();
+            //取出日志数据
             dataSbr = dataFileList.getData(pos, size);
             PreConditions.check(dataSbr != null && dataSbr.getByteBuffer() != null, DLedgerResponseCode.DISK_ERROR, "Get null data for %d", index);
             DLedgerEntry dLedgerEntry = DLedgerEntryCoder.decode(dataSbr.getByteBuffer());
@@ -630,13 +657,18 @@ public class DLedgerMmapFileStore extends DLedgerStore {
         return committedIndex;
     }
 
+    /**
+     * @param term              主节点当前的投票轮次。
+     * @param newCommittedIndex 主节点发送日志复制请求时的已提交日志序号
+     */
     public void updateCommittedIndex(long term, long newCommittedIndex) {
         if (newCommittedIndex == -1
                 || ledgerEndIndex == -1
-                || term < memberState.currTerm()
+                || term < memberState.currTerm() //说明当前任期已经大于 请求的term 无需处理了
                 || newCommittedIndex == this.committedIndex) {
             return;
         }
+        //committedIndex 肯定是递增的 不然不会允许
         if (newCommittedIndex < this.committedIndex
                 || newCommittedIndex < this.ledgerBeginIndex) {
             logger.warn("[MONITOR]Skip update committed index for new={} < old={} or new={} < beginIndex={}", newCommittedIndex, this.committedIndex, newCommittedIndex, this.ledgerBeginIndex);
@@ -644,11 +676,14 @@ public class DLedgerMmapFileStore extends DLedgerStore {
         }
         long endIndex = ledgerEndIndex;
         if (newCommittedIndex > endIndex) {
+            //committedIndex 不能超过 follower已经 保存了的最大 日志索引
             //If the node fall behind too much, the committedIndex will be larger than enIndex.
             newCommittedIndex = endIndex;
         }
+        //获取将要提交的那条日志条目
         DLedgerEntry dLedgerEntry = get(newCommittedIndex);
         PreConditions.check(dLedgerEntry != null, DLedgerResponseCode.DISK_ERROR);
+        //更新已提交索引和偏移量
         this.committedIndex = newCommittedIndex;
         this.committedPos = dLedgerEntry.getPos() + dLedgerEntry.getSize();
     }

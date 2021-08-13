@@ -102,6 +102,10 @@ public class MmapFileList {
         return this.mappedFiles.toArray();
     }
 
+    /**
+     * 删除指定偏移量之后的部分
+     * @param offset
+     */
     public void truncateOffset(long offset) {
         Object[] mfs = this.copyMappedFiles();
         if (mfs == null) {
@@ -114,16 +118,22 @@ public class MmapFileList {
             long fileTailOffset = file.getFileFromOffset() + this.mappedFileSize;
             if (fileTailOffset > offset) {
                 if (offset >= file.getFileFromOffset()) {
+                    //更新MmapFile 的 各项 position,注意这里还并没有真的删除
                     file.setWrotePosition((int) (offset % this.mappedFileSize));
                     file.setCommittedPosition((int) (offset % this.mappedFileSize));
                     file.setFlushedPosition((int) (offset % this.mappedFileSize));
                 } else {
+                    //起始偏移量大于 offset的文件直接整个都要删除
                     willRemoveFiles.add(file);
                 }
             }
         }
 
+        /**
+         * 销毁过期的文件
+         */
         this.destroyExpiredFiles(willRemoveFiles);
+        //从当前 MmapFileList中 删除上一步过期的文件
         this.deleteExpiredFiles(willRemoveFiles);
     }
 
@@ -142,6 +152,7 @@ public class MmapFileList {
         for (int i = 0; i < files.size(); i++) {
             MmapFile mmapFile = files.get(i);
             while (true) {
+                //销毁文件
                 if (mmapFile.destroy(10 * 1000)) {
                     break;
                 }
@@ -682,10 +693,17 @@ public class MmapFileList {
         }
     }
 
+    /**
+     * 根据 pos重建 MappedFile
+     */
     public boolean rebuildWithPos(long pos) {
+        //删除所有文件
         truncateOffset(-1);
+        //创建MappedFile
         getLastMappedFile(pos);
+        //删除pos之后的
         truncateOffset(pos);
+        //重新设置pos
         resetOffset(pos);
         return pos == getMaxWrotePosition() && pos == getMinOffset();
     }
